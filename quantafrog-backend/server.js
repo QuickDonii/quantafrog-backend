@@ -2,21 +2,20 @@ const express = require("express");
 const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
 const bodyParser = require("body-parser");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 
-// SQLite DB Setup
+// SQLite setup
 const db = new sqlite3.Database("./database.sqlite", (err) => {
-  if (err) return console.error("DB init error:", err.message);
-  console.log("✅ SQLite database connected");
+  if (err) return console.error("DB Error:", err.message);
+  console.log("✅ SQLite connected");
 });
 
+// Create users table
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -29,28 +28,26 @@ db.serialize(() => {
   `);
 });
 
-// 🔄 Get or create user
+// Helpers
 function getUser(id) {
   return new Promise((resolve, reject) => {
     db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
       if (err) return reject(err);
       if (row) return resolve(row);
 
-      // Create new user
-      const defaultUser = { id, coins: 0, energy: 10, tapPower: 1, referredBy: null };
+      const newUser = { id, coins: 0, energy: 10, tapPower: 1, referredBy: null };
       db.run(
         "INSERT INTO users (id, coins, energy, tapPower, referredBy) VALUES (?, ?, ?, ?, ?)",
         [id, 0, 10, 1, null],
         (err) => {
           if (err) return reject(err);
-          resolve(defaultUser);
+          resolve(newUser);
         }
       );
     });
   });
 }
 
-// 🔁 Update user data
 function updateUser(user) {
   return new Promise((resolve, reject) => {
     db.run(
@@ -64,20 +61,33 @@ function updateUser(user) {
   });
 }
 
-// 🚀 API Routes
-
-// Get user
+// ✅ GET user with optional referral
 app.get("/user/:id", async (req, res) => {
+  const id = req.params.id;
+  const ref = req.query.ref;
+
   try {
-    const user = await getUser(req.params.id);
+    let user = await getUser(id);
+
+    if (!user.referredBy && ref && ref !== id) {
+      user.referredBy = ref;
+      user.coins += 10;
+
+      const referrer = await getUser(ref);
+      referrer.coins += 10;
+
+      await updateUser(referrer);
+      await updateUser(user);
+    }
+
     res.json(user);
   } catch (err) {
     console.error("GET /user error:", err.message);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Update user
+// ✅ POST to update user
 app.post("/user/:id", async (req, res) => {
   try {
     const user = { ...req.body, id: req.params.id };
@@ -85,16 +95,16 @@ app.post("/user/:id", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("POST /user error:", err.message);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ✅ Health check
+// ✅ Root check
 app.get("/", (req, res) => {
   res.send("QUANTAFROG backend is running 🐸");
 });
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 QUANTAFROG backend running on port ${PORT}`);
+  console.log(`🚀 QUANTAFROG backend on port ${PORT}`);
 });
