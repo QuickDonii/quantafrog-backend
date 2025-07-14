@@ -1,81 +1,100 @@
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const db = require('./db');
+const express = require("express");
+const cors = require("cors");
+const sqlite3 = require("sqlite3").verbose();
+const bodyParser = require("body-parser");
+const path = require("path");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 
-const PORT = 3000;
-
-// Get user data or create if not exists
-app.get('/user/:id', (req, res) => {
-  const userId = req.params.id;
-  db.get("SELECT * FROM users WHERE id = ?", [userId], (err, row) => {
-    if (err) return res.status(500).send("DB error");
-    if (!row) {
-      db.run("INSERT INTO users (id) VALUES (?)", [userId], () => {
-        db.get("SELECT * FROM users WHERE id = ?", [userId], (err2, newUser) => {
-          res.json(newUser);
-        });
-      });
-    } else {
-      res.json(row);
-    }
-  });
+// SQLite DB Setup
+const db = new sqlite3.Database("./database.sqlite", (err) => {
+  if (err) return console.error("DB init error:", err.message);
+  console.log("✅ SQLite database connected");
 });
 
-// Update user data and handle referral 5% rewards
-app.post('/update', (req, res) => {
-  const { id, coins, energy, tapPower } = req.body;
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      coins INTEGER DEFAULT 0,
+      energy INTEGER DEFAULT 10,
+      tapPower INTEGER DEFAULT 1,
+      referredBy TEXT
+    )
+  `);
+});
 
-  db.get("SELECT * FROM users WHERE id = ?", [id], (err, user) => {
-    if (err || !user) return res.status(500).send("User fetch failed");
+// 🔄 Get or create user
+function getUser(id) {
+  return new Promise((resolve, reject) => {
+    db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
+      if (err) return reject(err);
+      if (row) return resolve(row);
 
-    const diff = coins - user.coins;
-
-    db.run("UPDATE users SET coins=?, energy=?, tapPower=? WHERE id=?",
-      [coins, energy, tapPower, id], err2 => {
-        if (err2) return res.status(500).send("Update failed");
-
-        if (diff > 0 && user.referredBy) {
-          const bonus = Math.floor(diff * 0.05);
-          db.run("UPDATE users SET coins = coins + ? WHERE id = ?", [bonus, user.referredBy]);
+      // Create new user
+      const defaultUser = { id, coins: 0, energy: 10, tapPower: 1, referredBy: null };
+      db.run(
+        "INSERT INTO users (id, coins, energy, tapPower, referredBy) VALUES (?, ?, ?, ?, ?)",
+        [id, 0, 10, 1, null],
+        (err) => {
+          if (err) return reject(err);
+          resolve(defaultUser);
         }
-
-        res.send("Updated + referral handled");
-      });
-  });
-});
-
-// Handle referral linking and initial rewards
-app.post('/referral', (req, res) => {
-  const { newUserId, referredBy } = req.body;
-  db.run("UPDATE users SET referredBy=? WHERE id=? AND referredBy IS NULL",
-    [referredBy, newUserId], function (err) {
-      if (err) return res.status(500).send("Referral failed");
-      if (this.changes === 0) return res.send("Already referred");
-
-      db.run("UPDATE users SET coins = coins + 10 WHERE id = ?", [newUserId]);
-      db.run("UPDATE users SET coins = coins + 5 WHERE id = ?", [referredBy]);
-      res.send("Referral successful");
+      );
     });
-});
-
-// Task claiming with prevention of double claims
-app.post('/task', (req, res) => {
-  const { id, taskId, amount } = req.body;
-
-  db.get("SELECT * FROM tasks WHERE user_id = ? AND task_id = ?", [id, taskId], (err, row) => {
-    if (row) return res.send("Already claimed");
-
-    db.run("INSERT INTO tasks (user_id, task_id, claimed_at) VALUES (?, ?, datetime('now'))", [id, taskId]);
-    db.run("UPDATE users SET coins = coins + ? WHERE id = ?", [amount, id]);
-    res.send("Rewarded");
   });
+}
+
+// 🔁 Update user data
+function updateUser(user) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      "UPDATE users SET coins = ?, energy = ?, tapPower = ?, referredBy = ? WHERE id = ?",
+      [user.coins, user.energy, user.tapPower, user.referredBy, user.id],
+      (err) => {
+        if (err) return reject(err);
+        resolve();
+      }
+    );
+  });
+}
+
+// 🚀 API Routes
+
+// Get user
+app.get("/user/:id", async (req, res) => {
+  try {
+    const user = await getUser(req.params.id);
+    res.json(user);
+  } catch (err) {
+    console.error("GET /user error:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
+// Update user
+app.post("/user/:id", async (req, res) => {
+  try {
+    const user = { ...req.body, id: req.params.id };
+    await updateUser(user);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /user error:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// ✅ Health check
+app.get("/", (req, res) => {
+  res.send("QUANTAFROG backend is running 🐸");
+});
+
+// Start server
 app.listen(PORT, () => {
-  console.log(`QUANTAFROG backend running on port ${PORT}`);
+  console.log(`🚀 QUANTAFROG backend running on port ${PORT}`);
 });
